@@ -1,7 +1,6 @@
 interface Env {
   ANCHOR_DATE?: string;
   MAX_FEED_ITEMS?: string;
-  ARTICLE_SALT?: string;
 }
 
 type DailyArticle = {
@@ -13,16 +12,17 @@ type DailyArticle = {
   chosen_at: string;
 };
 
-type WikipediaQueryResponse = {
-  query?: {
-    pages?: Array<{
-      pageid?: number;
-      title?: string;
-      fullurl?: string;
-      extract?: string;
-      missing?: boolean;
-      invalid?: boolean;
-    }>;
+type WikipediaFeaturedResponse = {
+  tfa?: {
+    title?: string;
+    normalizedtitle?: string;
+    extract?: string;
+    content_urls?: {
+      desktop?: {
+        page?: string;
+      };
+    };
+    pageid?: number;
   };
 };
 
@@ -30,10 +30,6 @@ const CADENCE_MIN = 1;
 const CADENCE_MAX = 7;
 const DEFAULT_MAX_FEED_ITEMS = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_ARTICLE_SALT = "wiki-rss";
-const MAX_WIKI_PAGE_ID = 60_000_000;
-const MAX_PAGE_LOOKUP_ATTEMPTS = 14;
-const PAGEID_STEP = 104_729;
 
 class ArticleResolutionError extends Error {}
 
@@ -43,7 +39,6 @@ export default {
       const url = new URL(request.url);
       const anchorDate = env.ANCHOR_DATE ?? "2026-01-01";
       const maxFeedItems = parsePositiveInt(env.MAX_FEED_ITEMS, DEFAULT_MAX_FEED_ITEMS);
-      const articleSalt = env.ARTICLE_SALT ?? DEFAULT_ARTICLE_SALT;
 
       if (request.method !== "GET") {
         return new Response("Method Not Allowed", { status: 405 });
@@ -74,7 +69,7 @@ export default {
         const articles: DailyArticle[] = [];
 
         for (const date of publishDates) {
-          const article = await getDeterministicDailyArticle(date, articleSalt);
+          const article = await getDeterministicDailyArticle(date);
           articles.push(article);
         }
 
@@ -99,7 +94,7 @@ export default {
         if (!isIsoDate(date)) {
           return Response.json({ error: "invalid date format, expected YYYY-MM-DD" }, { status: 400 });
         }
-        const article = await getDeterministicDailyArticle(date, articleSalt);
+        const article = await getDeterministicDailyArticle(date);
         return Response.json(article);
       }
 
@@ -114,48 +109,33 @@ export default {
   },
 };
 
-async function getDeterministicDailyArticle(date: string, salt: string): Promise<DailyArticle> {
-  const seed = seededHash(`${salt}:${date}`);
-  for (let attempt = 0; attempt < MAX_PAGE_LOOKUP_ATTEMPTS; attempt += 1) {
-    const pageId = candidatePageId(seed, attempt);
-    const page = await fetchWikipediaPageById(pageId);
-    if (!page) {
-      continue;
-    }
-    const title = page.title?.trim() || "Wikipedia Article";
-    const pageUrl = page.fullurl || `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`;
-    const extract = page.extract?.trim() || "No summary available.";
-    return {
-      date,
-      wiki_page_id: pageId,
-      title,
-      url: pageUrl,
-      extract,
-      chosen_at: `${date}T00:00:00.000Z`,
-    };
+async function getDeterministicDailyArticle(date: string): Promise<DailyArticle> {
+  const featured = await fetchWikipediaFeaturedArticle(date);
+  const tfa = featured.tfa;
+  if (!tfa?.title) {
+    throw new ArticleResolutionError(`no featured article found for date ${date}`);
   }
 
-  throw new ArticleResolutionError(`unable to resolve wikipedia article for date ${date}`);
+  const title = tfa.title.trim();
+  const extract = tfa.extract?.trim() || "No summary available.";
+  const pageUrl = tfa.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(tfa.normalizedtitle || title)}`;
+  const wikiPageId = Number.isFinite(tfa.pageid) ? Number(tfa.pageid) : fallbackPageIdFromTitle(title);
+
+  return {
+    date,
+    wiki_page_id: wikiPageId,
+    title,
+    url: pageUrl,
+    extract,
+    chosen_at: `${date}T00:00:00.000Z`,
+  };
 }
 
-async function fetchWikipediaPageById(pageId: number): Promise<{
-  title?: string;
-  fullurl?: string;
-  extract?: string;
-} | null> {
-  const params = new URLSearchParams({
-    action: "query",
-    format: "json",
-    formatversion: "2",
-    prop: "extracts|info",
-    inprop: "url",
-    exintro: "1",
-    explaintext: "1",
-    pageids: String(pageId),
-  });
-  const endpoint = `https://en.wikipedia.org/w/api.php?${params.toString()}`;
+async function fetchWikipediaFeaturedArticle(date: string): Promise<WikipediaFeaturedResponse> {
+  const [year, month, day] = date.split("-");
+  const endpoint = `https://en.wikipedia.org/api/rest_v1/feed/featured/${year}/${month}/${day}`;
 
-  for (let retry = 1; retry <= 2; retry += 1) {
+  for (let retry = 1; retry <= 3; retry += 1) {
     try {
       const response = await fetch(endpoint, {
         headers: {
@@ -167,21 +147,16 @@ async function fetchWikipediaPageById(pageId: number): Promise<{
         throw new Error(`wikipedia returned ${response.status}`);
       }
 
-      const body = (await response.json()) as WikipediaQueryResponse;
-      const page = body.query?.pages?.[0];
-      if (!page || page.missing || page.invalid || !page.pageid) {
-        return null;
-      }
-      return page;
+      return (await response.json()) as WikipediaFeaturedResponse;
     } catch {
-      if (retry === 2) {
-        return null;
+      if (retry === 3) {
+        throw new ArticleResolutionError(`unable to fetch featured article for date ${date}`);
       }
-      await sleep(retry * 120);
+      await sleep(retry * 150);
     }
   }
 
-  return null;
+  throw new ArticleResolutionError(`unable to fetch featured article for date ${date}`);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -244,17 +219,12 @@ function isIsoDate(value: string): boolean {
   return Number.isFinite(timestamp) && toIsoDate(new Date(timestamp)) === value;
 }
 
-function seededHash(input: string): number {
+function fallbackPageIdFromTitle(input: string): number {
   let hash = 0;
   for (let i = 0; i < input.length; i += 1) {
     hash = (hash * 31 + input.charCodeAt(i)) | 0;
   }
   return Math.abs(hash);
-}
-
-function candidatePageId(seed: number, attempt: number): number {
-  const offset = (seed + attempt * PAGEID_STEP) % MAX_WIKI_PAGE_ID;
-  return offset + 1;
 }
 
 function escapeXml(input: string): string {

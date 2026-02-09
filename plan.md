@@ -24,18 +24,11 @@ Build a Cloudflare Worker (TypeScript) that serves shared RSS feeds by cadence w
 
 ## Deterministic Date -> Article Algorithm
 1. Normalize date to UTC `YYYY-MM-DD`.
-2. Compute `seed = hash(salt + ":" + date)`.
-3. Compute candidate page id:
-   - `pageId = ((seed + attempt * STEP) % MAX_WIKI_PAGE_ID) + 1`
-4. Query Wikipedia by `pageids` using MediaWiki API.
-5. If page is missing/invalid, increment `attempt` and try next id.
-6. First valid page is that date's article.
-
-Constants:
-- `salt`: configurable string (`ARTICLE_SALT`)
-- `STEP`: fixed prime increment
-- `MAX_WIKI_PAGE_ID`: fixed upper bound for probe space
-- `MAX_PAGE_LOOKUP_ATTEMPTS`: fixed retry count
+2. Query Wikipedia featured feed endpoint for that date:
+   - `/api/rest_v1/feed/featured/YYYY/MM/DD`
+3. Read `tfa` (Today’s Featured Article).
+4. Use `tfa` title, URL, page id, and extract as the article for that date.
+5. Same UTC date always maps to the same featured article.
 
 ## Cadence Logic
 1. Cadence input `x` must be integer from 1 to 7.
@@ -84,10 +77,9 @@ Constants:
 ## Security and Operations
 1. Rate-limit feed and debug endpoints.
 2. Cache feed responses (`max-age` short TTL).
-3. Keep deterministic salt configurable via env var.
-4. Add structured logs for:
+3. Add structured logs for:
    - cadence requests
-   - date->page lookup failures
+   - date->featured lookup failures
    - generation latency
 
 ## Implementation Steps

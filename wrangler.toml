@@ -5,4 +5,3 @@ compatibility_date = "2026-02-08"
 [vars]
 ANCHOR_DATE = "2026-01-01"
 MAX_FEED_ITEMS = "20"
-ARTICLE_SALT = "wiki-rss"

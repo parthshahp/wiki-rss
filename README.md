@@ -1,6 +1,6 @@
 # wiki-rss
 
-Cloudflare Worker (TypeScript) that serves shared Wikipedia RSS feeds by cadence using a deterministic date->article mapping (no database).
+Cloudflare Worker (TypeScript) that serves shared Wikipedia RSS feeds by cadence using Wikipedia's featured article (`tfa`) for each UTC date (no database).
 
 ## Feed URLs
 
@@ -27,6 +27,6 @@ Cloudflare Worker (TypeScript) that serves shared Wikipedia RSS feeds by cadence
 
 ## Determinism
 
-- Worker computes a stable hash from `ARTICLE_SALT` + UTC date.
-- It probes deterministic Wikipedia page IDs until it finds a valid page.
-- Same `ARTICLE_SALT` and same date always produce the same article.
+- Worker queries Wikipedia featured feed for the requested UTC date.
+- It uses `tfa` (Today’s Featured Article) as that date's article.
+- Same date always resolves to the same article for everyone.
